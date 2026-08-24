@@ -1277,7 +1277,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
         # Local imports: module-level CP helper imports here are circular (#27014).
         from sglang.srt.layers.cp.padding import get_cp_padding_align_size
-        from sglang.srt.layers.cp.utils import enable_cp_v2
+        from sglang.srt.layers.cp.utils import supports_generic_prefill_cp
 
         assert self.global_num_tokens_cpu is not None
         assert self.global_num_tokens_for_logprob_cpu is not None
@@ -1297,7 +1297,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         # pad to attn_cp_size; CP off pads nothing (extra padding breaks EAGLE/MTP draft
         # prefill with NaN draft logits, see #23269).
         # FIXME(kpham-sgl): revisit so draft prefill-extend tolerates padded dummy tokens.
-        if not enable_cp_v2():
+        if not supports_generic_prefill_cp():
             cp_align_size = get_cp_padding_align_size()
             for i in range(sync_group_size):
                 global_num_tokens[i] = ceil_align(global_num_tokens[i], cp_align_size)
