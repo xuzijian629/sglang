@@ -168,21 +168,26 @@ def validate_deepseek_v4_cp(server_args: ServerArgs) -> None:
             f"got {server_args.cp_strategy}"
         )
 
-    declare_resolution(
-        server_args,
-        "validate_deepseek_v4_cp",
-        enable_dsa_prefill_context_parallel=True,
-    )
-    declare_resolution(
-        server_args,
-        "validate_deepseek_v4_cp",
-        enable_prefill_context_parallel=False,
-    )
-    declare_resolution(
-        server_args,
-        "validate_deepseek_v4_cp",
-        dsa_prefill_cp_mode="round-robin-split",
-    )
+    from sglang.srt.utils import is_hip, is_npu
+
+    if is_hip() or is_npu():
+        # Protected platform implementations still consume the legacy runtime
+        # fields. Generic backends use enable_prefill_cp/cp_strategy directly.
+        declare_resolution(
+            server_args,
+            "validate_deepseek_v4_cp",
+            enable_dsa_prefill_context_parallel=True,
+        )
+        declare_resolution(
+            server_args,
+            "validate_deepseek_v4_cp",
+            enable_prefill_context_parallel=False,
+        )
+        declare_resolution(
+            server_args,
+            "validate_deepseek_v4_cp",
+            dsa_prefill_cp_mode="round-robin-split",
+        )
     declare_resolution(
         server_args,
         "validate_deepseek_v4_cp",

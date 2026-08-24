@@ -129,6 +129,17 @@ class TestDeprecatedEnvRegistry(unittest.TestCase):
                 self.assertIn("--enable-w4a4-mxfp4-megamoe", str(caught[0].message))
                 self.assertIsNone(_DEPRECATED_ENVS[old_name].replacement)
 
+    def test_removed_cp_v2_env_warns_without_forwarding(self):
+        old_name = "SGLANG_ENABLE_CP_V2"
+        os.environ[old_name] = "0"
+        self.addCleanup(os.environ.pop, old_name, None)
+
+        self.assertIn(old_name, _DEPRECATED_ENVS)
+        caught = self._apply(old_name, _DEPRECATED_ENVS[old_name])
+
+        self.assertIn(f"{old_name} is deprecated", str(caught[0].message))
+        self.assertIsNone(_DEPRECATED_ENVS[old_name].replacement)
+
     def test_renamed_env_forwards_value(self):
         old_name, new_name = "SGLANG_TEST_OLD_ENV", "SGLANG_TEST_NEW_ENV"
         os.environ[old_name] = "abc"

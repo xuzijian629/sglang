@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import torch
 
+from sglang.srt.layers.attention.dsa.utils import is_dsa_enable_prefill_cp
 from sglang.srt.layers.cp.base import (
     ContextParallelStrategyKind,
     get_cp_strategy,
@@ -98,12 +99,43 @@ class TestCPStrategyUnit(CustomTestCase):
             )
         )
 
-        with patch(
-            "sglang.srt.environ.envs.SGLANG_ENABLE_CP_V2.get", return_value=True
+        self.assertIsNotNone(get_cp_strategy())
+        self.assertTrue(is_cp_enabled())
+        self.assertTrue(is_interleave())
+
+    def test_hip_dsa_cp_uses_protected_legacy_runtime_flag(self):
+        parallel = SimpleNamespace(
+            enable_dsa_prefill_context_parallel=False,
+            attn_cp_size=2,
+        )
+        model_config = SimpleNamespace(hf_config=SimpleNamespace())
+
+        with (
+            patch(
+                "sglang.srt.layers.attention.dsa.utils.get_parallel",
+                return_value=parallel,
+            ),
+            patch(
+                "sglang.srt.layers.attention.dsa.utils.process_model_config",
+                return_value=model_config,
+            ),
+            patch("sglang.srt.layers.attention.dsa.utils.is_hip", return_value=True),
+            patch(
+                "sglang.srt.configs.model_config.is_deepseek_dsa",
+                return_value=True,
+            ),
         ):
-            self.assertIsNotNone(get_cp_strategy())
-            self.assertTrue(is_cp_enabled())
-            self.assertTrue(is_interleave())
+            self.assertFalse(is_dsa_enable_prefill_cp())
+
+    @patch("sglang.srt.utils.is_npu", return_value=False)
+    @patch("sglang.srt.utils.is_hip", return_value=True)
+    def test_hip_keeps_strategy_cp_disabled(self, _mock_is_hip, _mock_is_npu):
+        self.assertFalse(enable_cp_v2())
+
+    @patch("sglang.srt.utils.is_npu", return_value=True)
+    @patch("sglang.srt.utils.is_hip", return_value=False)
+    def test_npu_keeps_strategy_cp_disabled(self, _mock_is_hip, _mock_is_npu):
+        self.assertFalse(enable_cp_v2())
 
 
 class TestPrefillCPBCGReplay(CustomTestCase):
@@ -162,10 +194,6 @@ class TestPrefillCPBCGReplay(CustomTestCase):
 
         with (
             patch(
-                "sglang.srt.environ.envs.SGLANG_ENABLE_CP_V2.get",
-                return_value=True,
-            ),
-            patch(
                 "sglang.srt.layers.cp.bcg.get_cp_padding_align_size",
                 return_value=8,
             ),
@@ -216,10 +244,6 @@ class TestPrefillCPBCGReplay(CustomTestCase):
         with (
             get_parallel().override(attn_cp_rank=0, attn_cp_size=4),
             patch(
-                "sglang.srt.environ.envs.SGLANG_ENABLE_CP_V2.get",
-                return_value=True,
-            ),
-            patch(
                 "sglang.srt.layers.cp.bcg.get_cp_padding_align_size",
                 return_value=8,
             ),
@@ -249,10 +273,6 @@ class TestPrefillCPBCGReplay(CustomTestCase):
 
         with (
             get_parallel().override(attn_cp_rank=0, attn_cp_size=4),
-            patch(
-                "sglang.srt.environ.envs.SGLANG_ENABLE_CP_V2.get",
-                return_value=True,
-            ),
             patch(
                 "sglang.srt.layers.cp.bcg.get_cp_padding_align_size",
                 return_value=8,
@@ -307,9 +327,7 @@ class TestCPZigzagStrategy(CustomTestCase):
             extend_seq_lens_cpu=[7],
         )
 
-        with patch(
-            "sglang.srt.environ.envs.SGLANG_ENABLE_CP_V2.get", return_value=True
-        ):
+        with patch.dict("os.environ", {"SGLANG_ENABLE_CP_V2": "0"}):
             self.assertTrue(enable_cp_v2())
             self.assertTrue(is_cp_v2_active(active_batch))
             self.assertFalse(is_cp_v2_active(inactive_batch))
@@ -503,14 +521,11 @@ class TestCPZigzagStrategy(CustomTestCase):
 
             local_x = strategy.shard_hidden_states(x, fb)
             local_positions = strategy.shard_position_ids(positions, fb)
-            with patch(
-                "sglang.srt.environ.envs.SGLANG_ENABLE_CP_V2.get", return_value=True
-            ):
-                helper_x, helper_positions = cp_split_before_forward(
-                    x,
-                    positions,
-                    fb,
-                )
+            helper_x, helper_positions = cp_split_before_forward(
+                x,
+                positions,
+                fb,
+            )
 
             self.assertTrue(torch.equal(local_x, expected_x))
             self.assertTrue(torch.equal(local_positions, expected_positions))
@@ -929,10 +944,6 @@ class TestCPInterleaveStrategy(CustomTestCase):
         with (
             get_parallel().override(attn_cp_rank=2, attn_cp_size=4),
             patch(
-                "sglang.srt.environ.envs.SGLANG_ENABLE_CP_V2.get",
-                return_value=True,
-            ),
-            patch(
                 "sglang.srt.layers.cp.padding.get_cp_padding_align_size",
                 return_value=4,
             ),
@@ -977,15 +988,11 @@ class TestCPInterleaveStrategy(CustomTestCase):
                 local_x = strategy.shard_hidden_states(x, fb)
                 local_positions = strategy.shard_position_ids(positions, fb)
 
-                with patch(
-                    "sglang.srt.environ.envs.SGLANG_ENABLE_CP_V2.get",
-                    return_value=True,
-                ):
-                    helper_x, helper_positions = cp_split_before_forward(
-                        x,
-                        positions,
-                        fb,
-                    )
+                helper_x, helper_positions = cp_split_before_forward(
+                    x,
+                    positions,
+                    fb,
+                )
 
             self.assertTrue(torch.equal(local_x, expected_x))
             self.assertTrue(torch.equal(local_positions, expected_positions))

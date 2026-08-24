@@ -359,10 +359,7 @@ def resolve_encoder_transfer_backend(
     return "zmq_to_scheduler"
 
 
-DSA_PREFILL_CP_SPLIT_CHOICES = ["in-seq-split", "round-robin-split"]
-NSA_PREFILL_CP_SPLIT_CHOICES = DSA_PREFILL_CP_SPLIT_CHOICES  # deprecated alias
-
-PREFILL_CP_SPLIT_CHOICES = ["in-seq-split"]
+NSA_PREFILL_CP_SPLIT_CHOICES = ["in-seq-split", "round-robin-split"]
 
 DEFAULT_LORA_EVICTION_POLICY = "lru"
 
@@ -3839,9 +3836,9 @@ class ServerArgs:
         # Validate PD disaggregation flags before CUDA graph config.
         self._handle_pd_disaggregation()
 
-        # Normalize deprecated CP aliases before validations or model-specific
-        # defaults inspect enable_prefill_cp/cp_strategy.
-        self._handle_legacy_cp_arguments()
+        # Normalize protected-platform CP aliases before validations or
+        # model-specific defaults inspect enable_prefill_cp/cp_strategy.
+        self._handle_platform_cp_compatibility()
         self._validate_prefill_only_disable_kv_cache_args()
         self._handle_dcp_validation()
 
@@ -3920,8 +3917,8 @@ class ServerArgs:
         self._handle_load_balance_method()
 
         # Re-apply after model-specific defaults resolve attention_backend so
-        # canonical CP mirrors to the right legacy runtime aliases.
-        self._handle_legacy_cp_arguments()
+        # HIP/NPU canonical CP mirrors to the protected runtime aliases.
+        self._handle_platform_cp_compatibility()
 
         # Handle context parallelism.
         self._handle_context_parallelism()
@@ -6862,7 +6859,22 @@ class ServerArgs:
                     self.mamba_ssm_dtype,
                 )
 
-    def _handle_legacy_cp_arguments(self):
+    def _handle_platform_cp_compatibility(self):
+        # Keep the legacy runtime fields only for the protected HIP/NPU
+        # implementations. Generic CUDA/MUSA paths use enable_prefill_cp and
+        # cp_strategy directly.
+        if not (is_hip() or is_npu()):
+            if (
+                self.enable_prefill_context_parallel
+                or self.enable_dsa_prefill_context_parallel
+            ):
+                raise ValueError(
+                    "Legacy prefill context-parallel options are supported only "
+                    "by protected HIP or Ascend NPU paths. Use "
+                    "--enable-prefill-cp with --cp-strategy."
+                )
+            return
+
         legacy_mode_to_strategy = {
             "in-seq-split": "zigzag",
             "round-robin-split": "interleave",
@@ -6877,18 +6889,18 @@ class ServerArgs:
             or self.enable_dsa_prefill_context_parallel
         ):
             self._declare(
-                "_handle_legacy_cp_arguments",
+                "_handle_platform_cp_compatibility",
                 enable_prefill_cp=True,
             )
 
         if self.enable_prefill_context_parallel and self.cp_strategy is None:
             self._declare(
-                "_handle_legacy_cp_arguments",
+                "_handle_platform_cp_compatibility",
                 cp_strategy=legacy_mode_to_strategy[self.prefill_cp_mode],
             )
         if self.enable_dsa_prefill_context_parallel and self.cp_strategy is None:
             self._declare(
-                "_handle_legacy_cp_arguments",
+                "_handle_platform_cp_compatibility",
                 cp_strategy=legacy_mode_to_strategy[self.dsa_prefill_cp_mode],
             )
 
@@ -6907,52 +6919,39 @@ class ServerArgs:
         ) in ("dsa", "dsv4")
         if use_dsa_legacy_aliases:
             self._declare(
-                "_handle_legacy_cp_arguments",
+                "_handle_platform_cp_compatibility",
                 enable_dsa_prefill_context_parallel=True,
             )
             self._declare(
-                "_handle_legacy_cp_arguments",
+                "_handle_platform_cp_compatibility",
                 enable_prefill_context_parallel=False,
             )
         else:
             self._declare(
-                "_handle_legacy_cp_arguments",
+                "_handle_platform_cp_compatibility",
                 enable_prefill_context_parallel=True,
             )
         self._declare(
-            "_handle_legacy_cp_arguments",
+            "_handle_platform_cp_compatibility",
             dsa_prefill_cp_mode=mode,
         )
         self._declare(
-            "_handle_legacy_cp_arguments",
+            "_handle_platform_cp_compatibility",
             prefill_cp_mode=mode,
         )
 
     def _handle_context_parallelism(self):
         if parse_connector_type(self.model_path) != ConnectorType.INSTANCE:
-            from sglang.srt.configs.model_config import is_deepseek_dsa
-            from sglang.srt.layers.cp.utils import CP_V2_DEFAULT_MODEL_CLASSES
-
             model_config = self.get_model_config()
             hf_config = model_config.hf_config
             model_arch = hf_config.architectures[0]
-            if model_arch in CP_V2_DEFAULT_MODEL_CLASSES:
-                is_dsa_default_model = is_deepseek_dsa(hf_config)
-                # DSA CP-v2 currently supports only the interleave strategy.
-                enable_default_cp_v2 = not is_dsa_default_model or (
-                    self.enable_prefill_cp and self.cp_strategy == "interleave"
-                )
-                if enable_default_cp_v2 and not envs.SGLANG_ENABLE_CP_V2.is_set():
-                    envs.SGLANG_ENABLE_CP_V2.set(True)
-
-            if (
-                self.enable_prefill_cp
-                and model_arch in ("MiMoV2ForCausalLM", "MiMoV2FlashForCausalLM")
-                and envs.SGLANG_ENABLE_CP_V2.get()
+            if self.enable_prefill_cp and model_arch in (
+                "MiMoV2ForCausalLM",
+                "MiMoV2FlashForCausalLM",
             ):
                 if self.cp_strategy != "zigzag":
                     raise ValueError(
-                        "MiMo V2 CP-v2 only supports --cp-strategy zigzag."
+                        "MiMo V2 prefill CP only supports --cp-strategy zigzag."
                     )
                 if (
                     model_config.is_multimodal
@@ -6960,7 +6959,7 @@ class ServerArgs:
                     and not self.language_model_only
                 ):
                     raise ValueError(
-                        "MiMo V2 CP-v2 only supports text inference; add "
+                        "MiMo V2 prefill CP only supports text inference; add "
                         "--language-only."
                     )
 
@@ -9496,13 +9495,6 @@ class ServerArgs:
             help="Deprecated alias for --cuda-graph-max-bs-prefill.",
         )
         parser.add_argument(
-            "--enable-dsa-prefill-context-parallel",
-            dest="enable_dsa_prefill_context_parallel",
-            action=DeprecatedStoreTrueAction,
-            new_flag="--enable-prefill-cp",
-            help="[Deprecated] Use --enable-prefill-cp instead.",
-        )
-        parser.add_argument(
             "--enable-nsa-prefill-context-parallel",
             dest="enable_dsa_prefill_context_parallel",
             action=DeprecatedStoreTrueAction,
@@ -9524,41 +9516,14 @@ class ServerArgs:
             help="[Deprecated] Use --enable-prefill-cp instead.",
         )
         parser.add_argument(
-            "--dsa-prefill-cp-mode",
-            dest="dsa_prefill_cp_mode",
-            action=DeprecatedAliasStoreAction,
-            new_flag="--cp-strategy",
-            type=str,
-            default=ServerArgs.dsa_prefill_cp_mode,
-            choices=DSA_PREFILL_CP_SPLIT_CHOICES,
-            help=(
-                "[Deprecated] Use --cp-strategy {zigzag,interleave} instead. "
-                "'in-seq-split' maps to 'zigzag'; 'round-robin-split' maps to "
-                "'interleave'."
-            ),
-        )
-        parser.add_argument(
             "--nsa-prefill-cp-mode",
             dest="dsa_prefill_cp_mode",
             action=DeprecatedAliasStoreAction,
             new_flag="--cp-strategy",
             type=str,
             default=argparse.SUPPRESS,
-            choices=DSA_PREFILL_CP_SPLIT_CHOICES,
+            choices=NSA_PREFILL_CP_SPLIT_CHOICES,
             help="[Deprecated] Use --cp-strategy instead.",
-        )
-        parser.add_argument(
-            "--prefill-cp-mode",
-            dest="prefill_cp_mode",
-            action=DeprecatedAliasStoreAction,
-            new_flag="--cp-strategy",
-            type=str,
-            default=ServerArgs.prefill_cp_mode,
-            choices=PREFILL_CP_SPLIT_CHOICES,
-            help=(
-                "[Deprecated] Use --cp-strategy {zigzag,interleave} instead. "
-                "'in-seq-split' maps to 'zigzag'."
-            ),
         )
         parser.add_argument(
             "--enable-flashinfer-allreduce-fusion",
