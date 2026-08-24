@@ -354,13 +354,21 @@ class TestCPZigzagStrategy(CustomTestCase):
 
         self.assertTrue(torch.equal(state.topk_indices, global_topk))
 
-    def test_eager_runner_passes_rank_local_input_ids_to_model_body(self):
-        metadata = self._metadata_for_rank(
-            0,
-            cp_size=4,
-            seq_lens=[8],
-            extend_seq_lens=[8],
+    def test_eager_runner_exposes_model_input_id_layouts(self):
+        init_cp_strategy(
+            SimpleNamespace(
+                enable_prefill_cp=True,
+                cp_strategy="interleave",
+                attn_cp_size=4,
+                attention_backend="fa3",
+            )
         )
+        with get_parallel().override(attn_cp_rank=0):
+            metadata = InterleaveCPStrategy(cp_size=4).build_metadata(
+                num_tokens=8,
+                seqs_len=[8],
+                extend_seqs_len=[8],
+            )
         forward_batch = self._forward_batch(metadata, [8])
         forward_batch.positions = torch.arange(8)
         forward_batch.spec_info = None
@@ -369,6 +377,7 @@ class TestCPZigzagStrategy(CustomTestCase):
         class Body:
             def __call__(self, input_ids, positions, forward_batch, **kwargs):
                 observed["input_ids"] = input_ids
+                observed["input_ids_global"] = forward_batch.input_ids_global
                 return kwargs["input_embeds"]
 
         model = SimpleNamespace(
@@ -387,6 +396,13 @@ class TestCPZigzagStrategy(CustomTestCase):
             runner._execute_extend_cp_v2(forward_batch, {})
 
         self.assertTrue(torch.equal(observed["input_ids"], expected))
+        self.assertTrue(
+            torch.equal(
+                observed["input_ids_global"],
+                torch.tensor([0, 4, 1, 5, 2, 6, 3, 7]),
+            )
+        )
+        self.assertFalse(hasattr(forward_batch, "input_ids_global"))
 
     def _expected_metadata(self, *, rank, cp_size, seq_lens, extend_seq_lens):
         bs = len(extend_seq_lens)
