@@ -36,6 +36,10 @@ from sglang.srt.layers.attention.dsa.utils import (
     is_dsa_enable_prefill_cp,
 )
 from sglang.srt.layers.aux_hidden_states import AuxHiddenStateAccumulator
+from sglang.srt.layers.cp.utils import (
+    is_mla_prefill_cp_enabled,
+    mla_use_prefill_cp,
+)
 from sglang.srt.layers.dp_attention import (
     attn_tp_all_gather_into_tensor,
     attn_tp_reduce_scatter_tensor,
@@ -62,10 +66,6 @@ from sglang.srt.layers.moe import (
 from sglang.srt.layers.quantization.fp8_utils import (
     _use_aiter_bpreshuffle_gfx95,
     materialize_bpreshuffle_fp8_scale_tuple,
-)
-from sglang.srt.layers.utils.cp_utils import (
-    is_mla_prefill_cp_enabled,
-    mla_use_prefill_cp,
 )
 from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
@@ -864,6 +864,15 @@ class LayerCommunicator:
             and (not self.is_last_layer)
             and (self._context.tp_size > 1)
         )
+
+
+def create_deepseek_layer_communicator(**kwargs) -> LayerCommunicator:
+    """Create the communicator appropriate for the configured attention layout."""
+    if get_parallel().enable_prefill_cp:
+        from sglang.srt.layers.communicator_dsa_cp import DSACPLayerCommunicator
+
+        return DSACPLayerCommunicator(**kwargs)
+    return LayerCommunicator(**kwargs)
 
 
 @dataclass
