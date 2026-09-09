@@ -473,9 +473,10 @@ def alloc_paged_token_slots_decode(
     tree_cache: BasePrefixCache,
     seq_lens: torch.Tensor,
     seq_lens_cpu: torch.Tensor,
-    last_loc: torch.Tensor,
+    req_to_token_pool: ReqToTokenPool,
+    req_pool_indices: torch.Tensor,
+    write_locs: torch.Tensor,
     token_per_req: int = 1,
-    req_pool_indices: Optional[torch.Tensor] = None,
     batch=None,
 ) -> torch.Tensor:
     """Allocate paged KV cache for decode batch."""
@@ -486,7 +487,7 @@ def alloc_paged_token_slots_decode(
 
     # DSV4-NPU allocator also needs req_pool_indices for C128 KV allocation and
     # returns a DSV4OutCacheLoc bundle; hasattr-gated so others stay unchanged.
-    is_dsv4 = req_pool_indices is not None and hasattr(allocator, "c128_attn_allocator")
+    is_dsv4 = hasattr(allocator, "c128_attn_allocator")
     extra_alloc_kwargs = {}
     if is_dsv4:
         extra_alloc_kwargs["req_pool_indices"] = req_pool_indices
@@ -494,15 +495,27 @@ def alloc_paged_token_slots_decode(
         if batch is not None:
             extra_alloc_kwargs["req_to_token_pool"] = batch.req_to_token_pool
 
-    out = allocator.alloc_decode(seq_lens, seq_lens_cpu, last_loc, **extra_alloc_kwargs)
-
     if is_dsv4:
+        last_loc = req_to_token_pool.req_to_token[req_pool_indices, seq_lens - 1]
+        out = allocator.alloc_decode(
+            seq_lens + token_per_req,
+            seq_lens_cpu + token_per_req,
+            last_loc,
+            **extra_alloc_kwargs,
+        )
         bundle = out
         out_cache_loc = None if bundle is None else bundle.out_full_loc
         if batch is not None:
             batch.out_cache_loc_dsv4 = bundle
     else:
-        out_cache_loc = out
+        out_cache_loc = allocator.alloc_decode_and_write(
+            req_to_token=req_to_token_pool.req_to_token,
+            req_pool_indices=req_pool_indices,
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
+            write_locs=write_locs,
+            token_per_req=token_per_req,
+        )
 
     if out_cache_loc is None:
         error_msg = (
@@ -514,6 +527,11 @@ def alloc_paged_token_slots_decode(
         if tree_cache is not None:
             tree_cache.pretty_print()
         raise RuntimeError(error_msg)
+
+    if is_dsv4:
+        req_to_token_pool.write(
+            (req_pool_indices, write_locs), out_cache_loc.to(torch.int32)
+        )
 
     return out_cache_loc
 
@@ -531,34 +549,29 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> torch.Tensor:
     seq_lens_gpu = batch.seq_lens
     bs = seq_lens_gpu.shape[0]
 
-    if _alloc_page_size(batch) == 1:
-        # Non-paged allocation
-        out_cache_loc = alloc_token_slots(batch.tree_cache, bs * token_per_req)
-    else:
-        # Paged allocation
-        last_loc = batch.req_to_token_pool.req_to_token[
-            batch.req_pool_indices, seq_lens_gpu - 1
-        ]
-        seq_lens_next = seq_lens_gpu + token_per_req
-        out_cache_loc = alloc_paged_token_slots_decode(
-            tree_cache=batch.tree_cache,
-            seq_lens=seq_lens_next,
-            seq_lens_cpu=batch.seq_lens_cpu + token_per_req,
-            last_loc=last_loc,
-            token_per_req=token_per_req,
-            req_pool_indices=batch.req_pool_indices,
-            batch=batch,
-        )
-
-    # Write to req_to_token_pool
     if batch.model_config.is_encoder_decoder:
         locs = batch.encoder_lens + seq_lens_gpu
     else:
         locs = seq_lens_gpu.clone()
 
-    batch.req_to_token_pool.write(
-        (batch.req_pool_indices, locs), out_cache_loc.to(torch.int32)
-    )
+    if _alloc_page_size(batch) == 1:
+        # Non-paged allocation
+        out_cache_loc = alloc_token_slots(batch.tree_cache, bs * token_per_req)
+        batch.req_to_token_pool.write(
+            (batch.req_pool_indices, locs), out_cache_loc.to(torch.int32)
+        )
+    else:
+        # Paged allocation
+        out_cache_loc = alloc_paged_token_slots_decode(
+            tree_cache=batch.tree_cache,
+            seq_lens=seq_lens_gpu,
+            seq_lens_cpu=batch.seq_lens_cpu,
+            req_to_token_pool=batch.req_to_token_pool,
+            req_pool_indices=batch.req_pool_indices,
+            write_locs=locs,
+            token_per_req=token_per_req,
+            batch=batch,
+        )
 
     # DSV4-NPU hook: no-op on non-DSV4 paths.
     if _is_npu:

@@ -135,6 +135,31 @@ class BaseTokenToKVPoolAllocator(abc.ABC):
     def alloc_decode(self, *args, **kwargs):
         raise NotImplementedError("alloc_decode is only for paged allocator")
 
+    def alloc_decode_and_write(
+        self,
+        *,
+        req_to_token: torch.Tensor,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        write_locs: torch.Tensor,
+        token_per_req: int,
+    ) -> torch.Tensor | None:
+        """Allocate decode slots and update the request-to-token mapping.
+
+        Out-of-tree allocators may override this method to fuse the device-side
+        gather, allocation, and write while preserving scheduler bookkeeping.
+        """
+        last_loc = req_to_token[req_pool_indices, seq_lens - 1]
+        out_cache_loc = self.alloc_decode(
+            seq_lens + token_per_req,
+            seq_lens_cpu + token_per_req,
+            last_loc,
+        )
+        if out_cache_loc is not None:
+            req_to_token[req_pool_indices, write_locs] = out_cache_loc.to(torch.int32)
+        return out_cache_loc
+
     def resize(self, config) -> None:
         self.size = config.max_total_num_tokens
         if self.page_size > 1:
